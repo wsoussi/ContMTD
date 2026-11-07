@@ -1,49 +1,75 @@
 # ContMTD
 
-**Live migration of containerized workloads under multi-dimensional resource contention.**
+**Live Migration Optimization for Containers in Moving Target Defense**
 
-ContMTD is a systems platform for relocating running containers between hosts without interrupting the
-services they provide. It combines OCI-native checkpoint and restore with a programmable contention
-model, continuous production-like traffic, and transparent network-level continuity, so that a workload
-can change hosts while it is already saturating its CPU, memory, disk, and network budgets.
+Cloud infrastructure is increasingly container-based, and Moving Target Defense (MTD) has become a
+practical way to raise the cost of attacks against it. Live migration (LiMi) is one of the most
+attractive MTD primitives, but its value depends entirely on how the migration is performed: no single
+LiMi method is optimal for every container, and migrating a multi-container application requires its
+containers to be restored together.
 
-ContMTD is the reference implementation accompanying our research. It is intended both as the artifact
-for reproducing our results and as a platform on which further work on contention-aware migration can
-be built.
+ContMTD is a container-based MTD framework for stateful microservices. It characterizes each container
+by its CPU, memory, storage, and network load, and uses that characterization both to select the most
+suitable LiMi method for every container and to schedule the parallel migration of a complete
+application. An MTD policy that keeps stateless components at the exposed edge of the service further
+prevents an existing infection from being carried into the new instance.
 
----
+Across randomly generated microservice scenarios, ContMTD reduces average migration downtime by up to
+42% compared with the state of the art, and improves security outcomes against side-channel exfiltration
+and stealthy malware propagation by 5–10%. The codebase and the LiMi dataset behind it are open source.
 
-## Overview
+## Contributions
 
-Container migration is routinely evaluated on idle workloads, yet real services run under sustained,
-multi-resource pressure. ContMTD treats contention as a first-class property of the migration lifecycle
-rather than as background noise: every migration is executed against an explicit, reproducible resource
-profile, under live client traffic, and with the service's network identity carried across the host
-boundary.
-
-The platform covers the complete path from workload instantiation to post-migration service continuity,
-and it records each relocation as a structured performance record suitable for analysis and modelling.
+- **LiMi optimization.** An ML module selects the optimal LiMi method per container and improves the
+  scheduling of multi-container migrations.
+- **Enhanced MTD strategy.** A policy that integrates stateless components into the migration process,
+  reducing the risk of transferring an infection to the new instance.
+- **Open LiMi dataset.** Measurements of 5890 validated live migrations, covering 34 container load
+  categories and the four LiMi methods, published together with the codebase.
 
 ---
 
 ## Design
 
-**Contention as a programmable dimension.** Each workload is instantiated under a resource profile that
-specifies CPU, memory, block I/O, and network intensity. Profiles are generated programmatically, applied
-through the container runtime's control-group interface, and can be composed into campaigns that span
-the contention space.
+ContMTD is organized as a set of cooperating modules:
 
-**Transport-agnostic migration strategies.** The platform implements cold, pre-copy, post-copy, and
-hybrid relocation as points on a single continuum, sharing the same control path, telemetry, and
-validation logic.
+- **Microservices monitoring** observes running containers through the runtime interface and `pidstat`,
+  tracking CPU, memory, and disk activity.
+- **Container load categorizer** maps each container onto a load category.
+- **ML module** hosts the LiMi classifier, which decides the migration method, and the migration-time
+  regressor, which predicts how long a container will take to migrate.
+- **MTD policy** is the decision engine that selects which application or container to migrate.
+- **LiMi controller** enforces migrations through the LiMi clients and servers deployed on the cloud
+  nodes, together with a layer-2 bridge that preserves session continuity.
+- **Parallel LiMi scheduler** orders and times the migrations of an application's containers.
 
-**Service continuity, not just state restoration.** Process state is only one part of a live service.
-ContMTD additionally carries the service's network identity across hosts and keeps client traffic
-flowing throughout the handover, so correctness is observed from the client's perspective.
+### Container load categorization
 
-**Measurement as part of the system.** Timing, transferred volume, and throughput for every phase of a
-relocation are captured by the platform itself, making results reproducible without external
-instrumentation.
+A container is described by four metrics — CPU load, memory load (high memory dirty-page rate), storage
+load (disk read/write operations), and network load (packet throughput) — each quantized into three
+intensity levels (low, medium, high), with an additional *very low* level for network to cover
+computational or idle containers. The resulting space of 3 × 3 × 3 × 4 = 108 categories is reduced to the
+34 combinations that are achievable in practice, since resource bottlenecks make the remaining ones
+infeasible; the intensity labels are then corrected according to the measured *de facto* consumption of
+each container.
+
+### Migration optimization workflow
+
+1. The containers to be migrated are monitored and categorized.
+2. The migration method is selected, either by a downtime regressor feeding a classifier, or directly by
+   a classifier such as the statistical heuristic proposed in the paper.
+3. A regression model predicts the total migration time of the container and the chosen method.
+4. The scheduler computes the start time of each migration so that all containers of the application are
+   restored at approximately the same time.
+
+### MTD policy
+
+ContMTD applies *stateless-ification*: the service is decomposed so that its externally exposed
+components are stateless and mediate all access to the stateful ones. Frequently migrating the exposed
+stateless containers removes malware and persistent threats from the attack surface, while stateful
+migrations are reserved for proactive defense against side-channel attacks. This avoids propagating an
+existing infection into the new instance, which live migration of a stateful container alone cannot
+prevent.
 
 ---
 
@@ -51,103 +77,81 @@ instrumentation.
 
 ```mermaid
 flowchart LR
-    subgraph SRC["Source host"]
-        ORCH["Campaign orchestrator"]
-        CT["Workload container"]
-        MIG["Migration driver"]
-    end
-    subgraph DST["Destination host"]
-        SRV["Restore service"]
-        RCT["Runtime restore"]
-    end
-    GEN["Traffic generator"]
-
-    ORCH -->|"applies contention profile"| CT
-    ORCH -->|"drives"| MIG
-    GEN -->|"live requests"| CT
-    MIG -->|"checkpoint image"| DST
-    MIG -->|"service identity handover"| DST
-    MIG -->|"restore request"| SRV
-    SRV --> RCT
-    RCT -->|"service resumes"| GEN
+    MON["Microservices monitoring"] --> CAT["Container load categorizer"]
+    CAT --> ML["ML module: LiMi classifier and migration-time regressor"]
+    ML --> SCHED["Parallel LiMi scheduler"]
+    POL["MTD policy"] --> CTRL["LiMi controller"]
+    SCHED --> CTRL
+    CTRL --> CLIENT["LiMi client (source node)"]
+    CTRL --> SERVER["LiMi server (destination node)"]
+    CTRL --> L2["L2 bridge"]
+    CLIENT -->|"checkpoints over SSH tunnel"| SERVER
+    L2 -->|"ARP-level address handover"| SERVER
 ```
 
-The **campaign orchestrator** enumerates contention profiles and migration strategies, controls workload
-and traffic lifecycles, and sequences long-running campaigns with recovery between iterations.
-
-The **migration driver** performs checkpointing, image transfer, network identity handover, and the
-restore request, executing phase-specific work concurrently where the strategy allows.
-
-The **restore service** runs on the destination host and performs the runtime restore, including
-lazy-page handling for strategies that require it.
+The LiMi client and server exchange checkpoints over an encrypted SSH tunnel, using `rsync` so that
+only the difference between the new checkpoint and any image already present at the destination is
+transferred. For stateful migrations, CRIU preserves established TCP connections, and the L2 bridge
+migrates the container's IP address at the ARP table level, keeping those sessions alive across the
+move. When the application has a writable root filesystem, the checkpoint delta and the volume delta
+are transferred in parallel to reduce downtime.
 
 ---
 
 ## Migration strategies
 
-| Strategy | Mechanism | Characteristic |
-|----------|-----------|----------------|
-| **Cold** | Freeze, full checkpoint, transfer, restore | Simplest transfer path; interruption equals the full state transfer |
-| **Pre-copy** | Iterative pre-dump followed by a short final dump | Transfers the bulk of memory ahead of the freeze window |
-| **Post-copy** | Lazy page transfer from the source during execution at the destination | Keeps the freeze window short at the cost of post-resume page faults |
-| **Hybrid** | Pre-dump followed by lazy page transfer | Combines bulk pre-transfer with a short interruption |
+| Method | Description |
+|--------|-------------|
+| **Basic (cold)** | Freeze the container, checkpoint it, transfer the checkpoint, restore at the destination, and redirect client traffic |
+| **Pre-copy** | Transfer state while the container keeps running; the final transfer only carries the data produced since the pre-dump |
+| **Post-copy** | Freeze at the start of the migration, transfer only the minimal state required to restore, then send the remaining pages while the service runs at the destination |
+| **Hybrid** | Perform a pre-dump and then proceed with the post-copy method |
+
+No single method is optimal for every workload: pre-copy and hybrid tend to minimize downtime, whereas
+post-copy and hybrid risk QoS degradation, and the best choice depends on the container's load profile.
+ContMTD determines that choice per container and coordinates the resulting migrations, instead of
+applying one method to an entire application.
+
+## Evaluation highlights
+
+- An average downtime reduction of 42% with the heuristic selector and 40% with the Random Forest
+  selector, relative to the state-of-the-art parallel migration scheme, with ContMTD performing better in
+  95% of the evaluated cases.
+- A 71% average reduction in container misalignment when scheduling parallel migrations of a
+  multi-container application.
+- 4% fewer exfiltrated containers and 5% fewer exfiltrated data units in the side-channel scenario, and
+  a 10–12% lower attack success rate in the stealthy malware scenario.
 
 ---
 
-## Components
+## Repository components
 
-| Area | Implementation |
-|------|----------------|
-| Migration control plane | `migrate.py`, `server_script.py` |
-| Campaign orchestration | `combos_migration/v_phase/`, `combos_migration/shell_start.sh` |
-| Contention model | `dynamic_intensive.py`, `gen_al_combinations_w_veryhigh.py` |
-| Workload and traffic | `containers/dynamic_container/` |
-| Network continuity | `layer2_vpn/`, `ovpn_setting/` |
+| Component | Implementation |
+|-----------|----------------|
+| LiMi client | `migrate.py` |
+| LiMi server | `server_script.py` |
+| L2 bridge | `layer2_vpn/`, `ovpn_setting/` |
+| Load categorization | `combos_migration/v_phase/dynamic_intensive.py`, `combos_migration/v_phase/gen_al_combinations_w_veryhigh.py` |
+| Migration campaign | `combos_migration/v_phase/`, `combos_migration/shell_start.sh` |
+| Benchmarking container and traffic | `containers/dynamic_container/` |
+| Dependency manifests | `requirements.text`, `system_requirements.text` |
 
-The workload generator sustains disk write pressure while exposing an HTTP service interface, and the
-bundled traffic generator exercises that interface throughout a relocation. Network continuity is
-provided by a layer-2 interconnect between hosts, allowing the service address to follow the workload
-without reconfiguration of clients.
+The benchmarking container exercises the four load dimensions used for categorization: computation,
+memory writes, disk writes with explicit flushing, and an HTTP service that reports the number of
+requests received. Intensity is enforced through cgroups at the runtime level, except for network load,
+which follows from the number of users and requests per second issued by the Locust client.
 
----
-
-## Repository structure
-
-```
-.
-├── migrate.py                     Migration driver: checkpoint, transfer, identity handover
-├── server_script.py               Restore service for the destination host
-├── requirements.text              Python dependencies
-├── system_requirements.text       System dependencies
-├── combos_migration/
-│   ├── shell_start.sh             Workload lifecycle
-│   └── v_phase/
-│       ├── wrapper_script.sh      Campaign entry point
-│       ├── combos_migration_for_v.py     Campaign orchestration
-│       ├── gen_al_combinations_w_veryhigh.py   Contention profile application
-│       └── dynamic_intensive.py   Contention model
-├── containers/
-│   └── dynamic_container/
-│       ├── Dockerfile
-│       ├── dyn_generator_w_fastAPI.py     Workload generator and service endpoint
-│       ├── start_container.sh
-│       ├── requirements.txt
-│       └── simple_locust.py       Traffic generator
-├── ovpn_setting/
-│   ├── client.conf                Layer-2 interconnect client
-│   └── arp_settings/
-│       └── net_cronjob.sh         Service address assignment
-└── layer2_vpn/
-    └── bridge-start.sh            TAP bridging for the layer-2 interconnect
-```
+Every migration is recorded together with its method, load category, phase timings, checkpoint and
+volume sizes, transfer times, restore time, and downtime. These records are the measurements from which
+the LiMi dataset is constructed.
 
 ---
 
 ## Getting started
 
-**Prerequisites.** An OCI-compatible container runtime with checkpoint/restore support, CRIU, a Python 3
-environment, a load generator, and a layer-2 interconnect between the participating hosts. Dependency
-manifests are provided as `system_requirements.text` and `requirements.text`.
+**Prerequisites.** An OCI-compatible container runtime with checkpoint/restore support (CRIU), a Python 3
+environment, a Locust load generator, and a layer-2 interconnect between the participating hosts.
+Dependency manifests are provided as `system_requirements.text` and `requirements.text`.
 
 ```bash
 pip install -r requirements.text
@@ -156,8 +160,9 @@ pip install -r requirements.text
 **Deployment.**
 
 1. Distribute the platform to every host participating in the deployment.
-2. Build the workload image from `containers/dynamic_container/` and register it with the runtime.
-3. Start the restore service on the destination host:
+2. Build the benchmarking container from `containers/dynamic_container/` and register it with the
+   runtime.
+3. Start the LiMi server on the destination host:
 
    ```bash
    sudo python3 server_script.py
@@ -169,14 +174,16 @@ pip install -r requirements.text
    sudo combos_migration/v_phase/wrapper_script.sh
    ```
 
-Deployment-specific parameters, such as host identities, interface names, and contention profiles, are
-supplied by the operator for each environment. A single relocation can also be issued directly through
-the migration driver by selecting the migration strategy through its pre-copy and post-copy controls.
+Deployment-specific parameters, such as host identities, interface names, and load profiles, are
+supplied by the operator for each environment. A single migration can also be issued directly through
+the LiMi client by selecting the method through its pre-copy and post-copy controls.
 
 ---
 
 ## Citation
 
-The design and evaluation of ContMTD are presented in the accompanying paper. Citation details will be
-published here.
+W. Soussi, G. Cantali, G. Gür, and B. Stiller, "ContMTD: Live Migration Optimization for Containers in
+Moving Target Defense."
+
+The codebase and the LiMi dataset are published at https://github.com/wsoussi/ContMTD.
 
