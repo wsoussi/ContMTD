@@ -16,7 +16,7 @@ prevents an existing infection from being carried into the new instance.
 
 Across randomly generated microservice scenarios, ContMTD reduces average migration downtime by up to
 42% compared with the state of the art, and improves security outcomes against side-channel exfiltration
-and stealthy malware propagation by 5–10%. The codebase and the LiMi dataset behind it are open source.
+and stealthy malware propagation by 5-10%. The codebase and the LiMi dataset behind it are open source.
 
 ## Contributions
 
@@ -29,26 +29,29 @@ and stealthy malware propagation by 5–10%. The codebase and the LiMi dataset b
 
 ---
 
+
 ## Design
 
-ContMTD is organized as a set of cooperating modules:
+### Migration strategies
 
-- **Microservices monitoring** observes running containers through the runtime interface and `pidstat`,
-  tracking CPU, memory, and disk activity.
-- **Container load categorizer** maps each container onto a load category.
-- **ML module** hosts the LiMi classifier, which decides the migration method, and the migration-time
-  regressor, which predicts how long a container will take to migrate.
-- **MTD policy** is the decision engine that selects which application or container to migrate.
-- **LiMi controller** enforces migrations through the LiMi clients and servers deployed on the cloud
-  nodes, together with a layer-2 bridge that preserves session continuity.
-- **Parallel LiMi scheduler** orders and times the migrations of an application's containers.
+| Method | Description |
+|--------|-------------|
+| **Basic (cold)** | Freeze the container, checkpoint it, transfer the checkpoint, restore at the destination, and redirect client traffic |
+| **Pre-copy** | Transfer state while the container keeps running; the final transfer only carries the data produced since the pre-dump |
+| **Post-copy** | Freeze at the start of the migration, transfer only the minimal state required to restore, then send the remaining pages while the service runs at the destination |
+| **Hybrid** | Perform a pre-dump and then proceed with the post-copy method |
+
+No single method is optimal for every workload: pre-copy and hybrid tend to minimize downtime, whereas
+post-copy and hybrid risk QoS degradation, and the best choice depends on the container's load profile.
+ContMTD determines that choice per container and coordinates the resulting migrations, instead of
+applying one method to an entire application.
 
 ### Container load categorization
 
-A container is described by four metrics — CPU load, memory load (high memory dirty-page rate), storage
-load (disk read/write operations), and network load (packet throughput) — each quantized into three
+A container is described by four metrics - CPU load, memory load (high memory dirty-page rate), storage
+load (disk read/write operations), and network load (packet throughput) - each quantized into three
 intensity levels (low, medium, high), with an additional *very low* level for network to cover
-computational or idle containers. The resulting space of 3 × 3 × 3 × 4 = 108 categories is reduced to the
+computational or idle containers. The resulting space of 3 x 3 x 3 x 4 = 108 categories is reduced to the
 34 combinations that are achievable in practice, since resource bottlenecks make the remaining ones
 infeasible; the intensity labels are then corrected according to the measured *de facto* consumption of
 each container.
@@ -89,28 +92,13 @@ flowchart LR
     L2 -->|"ARP-level address handover"| SERVER
 ```
 
-The LiMi client and server exchange checkpoints over an encrypted SSH tunnel, using `rsync` so that
-only the difference between the new checkpoint and any image already present at the destination is
-transferred. For stateful migrations, CRIU preserves established TCP connections, and the L2 bridge
+The LiMi client and server exchange checkpoints over an encrypted tunnel, with a `sync` that
+transfers only the difference between the new checkpoint and any image already present at the destination. For stateful migrations, CRIU preserves established TCP connections, and the L2 bridge
 migrates the container's IP address at the ARP table level, keeping those sessions alive across the
 move. When the application has a writable root filesystem, the checkpoint delta and the volume delta
 are transferred in parallel to reduce downtime.
 
 ---
-
-## Migration strategies
-
-| Method | Description |
-|--------|-------------|
-| **Basic (cold)** | Freeze the container, checkpoint it, transfer the checkpoint, restore at the destination, and redirect client traffic |
-| **Pre-copy** | Transfer state while the container keeps running; the final transfer only carries the data produced since the pre-dump |
-| **Post-copy** | Freeze at the start of the migration, transfer only the minimal state required to restore, then send the remaining pages while the service runs at the destination |
-| **Hybrid** | Perform a pre-dump and then proceed with the post-copy method |
-
-No single method is optimal for every workload: pre-copy and hybrid tend to minimize downtime, whereas
-post-copy and hybrid risk QoS degradation, and the best choice depends on the container's load profile.
-ContMTD determines that choice per container and coordinates the resulting migrations, instead of
-applying one method to an entire application.
 
 ## Evaluation highlights
 
@@ -120,30 +108,7 @@ applying one method to an entire application.
 - A 71% average reduction in container misalignment when scheduling parallel migrations of a
   multi-container application.
 - 4% fewer exfiltrated containers and 5% fewer exfiltrated data units in the side-channel scenario, and
-  a 10–12% lower attack success rate in the stealthy malware scenario.
-
----
-
-## Repository components
-
-| Component | Implementation |
-|-----------|----------------|
-| LiMi client | `migrate.py` |
-| LiMi server | `server_script.py` |
-| L2 bridge | `layer2_vpn/`, `ovpn_setting/` |
-| Load categorization | `combos_migration/v_phase/dynamic_intensive.py`, `combos_migration/v_phase/gen_al_combinations_w_veryhigh.py` |
-| Migration campaign | `combos_migration/v_phase/`, `combos_migration/shell_start.sh` |
-| Benchmarking container and traffic | `containers/dynamic_container/` |
-| Dependency manifests | `requirements.text`, `system_requirements.text` |
-
-The benchmarking container exercises the four load dimensions used for categorization: computation,
-memory writes, disk writes with explicit flushing, and an HTTP service that reports the number of
-requests received. Intensity is enforced through cgroups at the runtime level, except for network load,
-which follows from the number of users and requests per second issued by the Locust client.
-
-Every migration is recorded together with its method, load category, phase timings, checkpoint and
-volume sizes, transfer times, restore time, and downtime. These records are the measurements from which
-the LiMi dataset is constructed.
+  a 10-12% lower attack success rate in the stealthy malware scenario.
 
 ---
 
