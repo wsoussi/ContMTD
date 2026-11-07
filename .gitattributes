@@ -1,0 +1,8 @@
+# Keep POSIX line endings for anything executed on the Linux nodes.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.conf  text eol=lf
+Dockerfile      text eol=lf
+*.text  text eol=lf
+*.txt   text eol=lf
+*.md    text eol=lf

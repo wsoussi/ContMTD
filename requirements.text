@@ -1,0 +1,5 @@
+configparser==7.0.0
+redis==5.0.4
+setuptools==70.0.0
+thread==2.0.3
+typing_extensions==4.12.1
